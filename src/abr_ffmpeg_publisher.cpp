@@ -277,6 +277,7 @@ rmw_qos_profile_t ABRFFMPEGPublisher::initialize(
   auto current_time = steady_clock.now();
 
   init_ready = true;
+  RCLCPP_INFO(logger_, "PRUEBA");
 
   // namespace handling code lifted from compressed_image_transport
   const uint ns_len = node->get_effective_namespace().length();

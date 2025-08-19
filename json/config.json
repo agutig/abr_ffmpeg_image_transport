@@ -1,7 +1,7 @@
 {
     "gop_size": 0,
     "codecName": "libx264",
-    "target_framerate":24,
+    "target_framerate":12,
     "abr_k_factor":1,
     "abr_bitrate_time_window":0.5,
     "abr_stability_recover_time":1,
@@ -11,7 +11,7 @@
     "abr_emergency_latency_threshold": 0.5,
     "predictor":"hm",
     "ripple_order":4,
-    "csv":true,
-    "republish_data":false,
+    "csv":false,
+    "republish_data":true,
     "max_rate_mbps":15
 }

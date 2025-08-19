@@ -79,12 +79,26 @@ public:
   std::string getPredictor() {return abr_predictor;}
   bool getRepublishData() const {return republish_data_;}
   int getRippleOrder() const {return ripple_order;}
+  
 
   void reconfigureBuffers();
   void getAndPrintSystemUsage();
   void initCsvFile();
   void activateEmergencyMode();
   void updateUnestabilityBuffer(bool isUnstable);
+
+  void publishAbrInfo(
+  double size,
+  double latency,
+  double instant_bitrate,
+  double mean,
+  double hm,
+  double median,
+  double jitter,
+  double ideal_expected_bitrate,
+  const rclcpp::Time &actual_time
+);
+
 
   int bitrate_buffer_position = 0;
   std::deque<double> bitrate_buffer_;

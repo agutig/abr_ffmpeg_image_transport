@@ -318,35 +318,11 @@ void AbrComponent::analyzeFlow(
       }
 
       if (republish_data_) {
-                // Publish on data topic
-        abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket abr_info_msg;
-        abr_info_msg.role = "client";
-        abr_info_msg.msg_type = 4;
-        nlohmann::json msg_json = {
-          {"elapsed_time", (actual_time - getStartTime()).seconds()},
-          {"size", size / 1e6},
-          {"latency", latency},
-          {"instant bitrate", instant_bitrate / 1e6},
-          {"mean", mean / 1e6},
-          {"hm", hm / 1e6},
-          {"median", median / 1e6},
-          {"jitter", jitter},
-          {"ideal_rate", ideal_expected_bitrate / 1e6},
-
-        };
-
-        abr_info_msg.msg_json = msg_json.dump();
-        publish_msg_(abr_info_msg);
+        publishAbrInfo(size, latency, instant_bitrate, mean, hm, median,
+                      jitter, ideal_expected_bitrate, actual_time);
       }
 
-            /*
-            RCLCPP_INFO(
-            rclcpp::get_logger("AbrComponent"),
-            "Size: %zu bits, Latency: %.6f seconds, instant_bitrate: %.2f  Mbits/s, mean bitrate %.2f Mbits/s, Harmonic Mean: %.2f Mbit/s, Median: %.2f Mbit/s, jitter: %.2f  , ideal_flow: %.2f",
-            size, latency, instant_bitrate/ 1e6 ,mean /1e6 , hm/ 1e6 ,median/1e6, jitter, ideal_expected_bitrate/ 1e6 );
-            */
 
-            // Call ABR logic
       abr_logic2();
       bitrate_buffer_.clear();
 
@@ -354,6 +330,40 @@ void AbrComponent::analyzeFlow(
   }
     // Update previous timestamp for next packet
   previous_timeStamp = actual_time;
+}
+
+void AbrComponent::publishAbrInfo(
+    double size,
+    double latency,
+    double instant_bitrate,
+    double mean,
+    double hm,
+    double median,
+    double jitter,
+    double ideal_expected_bitrate,
+    const rclcpp::Time &actual_time)
+{
+  // Construir mensaje
+  abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket abr_info_msg;
+  abr_info_msg.role = "client";
+  abr_info_msg.msg_type = 4;
+
+  nlohmann::json msg_json = {
+    {"elapsed_time", (actual_time - getStartTime()).seconds()},
+    {"size", size / 1e6},
+    {"latency", latency},
+    {"instant_bitrate", instant_bitrate / 1e6},
+    {"mean", mean / 1e6},
+    {"hm", hm / 1e6},
+    {"median", median / 1e6},
+    {"jitter", jitter},
+    {"ideal_rate", ideal_expected_bitrate / 1e6},
+  };
+
+  abr_info_msg.msg_json = msg_json.dump();
+
+  // Publicar
+  publish_msg_(abr_info_msg);
 }
 
 

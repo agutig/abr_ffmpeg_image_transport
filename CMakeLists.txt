@@ -52,16 +52,16 @@ target_include_directories(${LIBRARY_NAME} PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<INSTALL_INTERFACE:include>")
 
-ament_target_dependencies(${LIBRARY_NAME}
-PUBLIC
-  image_transport
-  pluginlib
-  rclcpp
-  sensor_msgs
-  ffmpeg_encoder_decoder
-  ffmpeg_image_transport_msgs
-  nlohmann_json
-  abr_ffmpeg_image_transport_interfaces)
+target_link_libraries(abr_ffmpeg_image_transport_component PUBLIC
+  ${abr_ffmpeg_image_transport_interfaces_TARGETS}
+  ${ffmpeg_image_transport_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
+  ffmpeg_encoder_decoder::ffmpeg_encoder_decoder
+  image_transport::image_transport
+  pluginlib::pluginlib
+  rclcpp::rclcpp
+  sensor_msgs::sensor_msgs_library
+)
 
 ament_export_dependencies(
   rosidl_default_runtime
