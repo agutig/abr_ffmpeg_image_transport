@@ -18,34 +18,47 @@
 
 #include <ffmpeg_encoder_decoder/encoder.hpp>
 #include <ffmpeg_image_transport_msgs/msg/ffmpeg_packet.hpp>
-#include "abr_ffmpeg_image_transport_interfaces/msg/abr_info_packet.hpp"
 #include <image_transport/simple_publisher_plugin.hpp>
-#include <memory>
+
 #include <sensor_msgs/msg/image.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+
 #include <nlohmann/json.hpp>
 
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <utility>
+
+#include "abr_ffmpeg_image_transport_interfaces/msg/abr_info_packet.hpp"
 
 namespace abr_ffmpeg_image_transport
 {
+
 using ffmpeg_image_transport_msgs::msg::FFMPEGPacket;
 using FFMPEGPublisherPlugin = image_transport::SimplePublisherPlugin<FFMPEGPacket>;
 using Image = sensor_msgs::msg::Image;
 using FFMPEGPacketConstPtr = FFMPEGPacket::ConstSharedPtr;
 
+/**
+ * @brief Publisher plugin with ABR (Adaptive Bitrate) support on top of the ffmpeg encoder.
+ */
 class ABRFFMPEGPublisher : public FFMPEGPublisherPlugin
 {
 public:
   using ParameterDescriptor = rcl_interfaces::msg::ParameterDescriptor;
   using ParameterValue = rclcpp::ParameterValue;
-  struct ParameterDefinition
-  {
+
+  struct ParameterDefinition {
     ParameterValue defaultValue;
     ParameterDescriptor descriptor;
   };
 
   ABRFFMPEGPublisher();
   ~ABRFFMPEGPublisher() override;
-  std::string getTransportName() const override {return "abr_ffmpeg";}
+
+  [[nodiscard]] std::string getTransportName() const noexcept override { return "abr_ffmpeg"; }
 
 protected:
 #if defined(IMAGE_TRANSPORT_API_V1) || defined(IMAGE_TRANSPORT_API_V2)
@@ -56,72 +69,83 @@ protected:
     rclcpp::Node * node, const std::string & base_topic, rmw_qos_profile_t custom_qos,
     rclcpp::PublisherOptions opt) override;
 #endif
+
   void publish(const Image & message, const PublishFn & publish_fn) const override;
 
-
+  // Initialization state exposed to publish()
   bool init_ready = false;
-  mutable bool ready_to_recive_video = false;
+  mutable bool ready_to_receive_video = false;  // renamed from ready_to_recive_video
 
 private:
-  void packetReady(
-    const std::string & frame_id, const rclcpp::Time & stamp, const std::string & codec,
-    uint32_t width, uint32_t height, uint64_t pts, uint8_t flags, uint8_t * data, size_t sz);
+  // ---- lifecycle/helpers ----------------------------------------------------
+  void packetReady(const std::string & frame_id,
+                   const rclcpp::Time & stamp,
+                   const std::string & codec,
+                   uint32_t width,
+                   uint32_t height,
+                   uint64_t pts,
+                   uint8_t flags,
+                   uint8_t * data,
+                   size_t sz);
 
   rmw_qos_profile_t initialize(
-    rclcpp::Node * node, const std::string & base_name, rmw_qos_profile_t custom_qos);
+    rclcpp::Node * node, const std::string & base_topic, rmw_qos_profile_t custom_qos);
+
   void declareParameter(
     rclcpp::Node * node, const std::string & base_name, const ParameterDefinition & definition);
-  // variables ---------
+
+  // ---- logging / encoder / counters -----------------------------------------
   rclcpp::Logger logger_;
-  const PublishFn * publishFunction_{NULL};
+  const PublishFn * publishFunction_{nullptr};
   ffmpeg_encoder_decoder::Encoder encoder_;
   uint32_t frameCounter_{0};
-  // ---------- configurable parameters
-  int performanceInterval_{175};  // num frames between perf printouts
+
+  // ---- configurable parameters ----------------------------------------------
+  int  performanceInterval_{175};   // frames between perf printouts
   bool measurePerformance_{false};
 
-
-  // ----- ABR -------
-  // ABR communication channels
+  // ---- ABR comms ------------------------------------------------------------
   rclcpp::Publisher<abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket>::SharedPtr
     abr_info_publisher_;
   rclcpp::Subscription<abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket>::SharedPtr
     abr_info_subscriber_;
+
   void abrInfoCallback(
     const abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket::SharedPtr msg);
 
-  // Bitrate ladder
-  mutable int width;
-  mutable int height;
-  mutable int forced_width;
-  mutable int forced_height;
-  mutable int selected_bitrate;
-  rclcpp::Node * node_;
+  // ---- ABR state (shared between publish() and callback) --------------------
+  // NOTE: kept 'mutable' because publish() is const per image_transport API.
+  mutable int   width{0};
+  mutable int   height{0};
+  mutable int   forced_width{0};
+  mutable int   forced_height{0};
+  mutable int   selected_bitrate{0};              // bps (temporary during setup)
+  mutable double current_bitrate_mbps_{-1.0};     // Mbps (kept as-is per project choice)
+  mutable int   selected_bitrate_init_bps_{0};    // bps (precomputed initial bitrate)
 
-  mutable double framerate = 0.0;
+  rclcpp::Node * node_{nullptr};
+
+  // framerate estimation / stamping
+  mutable double       framerate{0.0};
   mutable rclcpp::Time framerate_ts;
-  mutable std::vector<double> bitrate_ladder;
-  mutable std::string bitrate_ladder_string = "";
+  mutable rclcpp::Time last_update_time{rclcpp::Time(0, 0, RCL_STEADY_TIME)};
+
+  // bitrate ladder & serialization
+  mutable std::vector<double> bitrate_ladder;     // Mbps
+  mutable std::string         bitrate_ladder_string; // serialized JSON of ladder
+  mutable bool                ladder_ready{false};
+
+  // resolution mapping and app configuration
   std::unordered_map<std::string, std::pair<int, int>> resolution_map_;
+  nlohmann::json app_config_json_;
 
-  mutable bool ladder_ready = false;
-
-  mutable int framerate_sum = 0;     // Suma de los valores de framerate en el último segundo
-  mutable int framerate_count = 0;   // Cantidad de valores en el último segundo
-  mutable rclcpp::Time last_update_time = rclcpp::Time(0, 0, RCL_STEADY_TIME);  // Marca de tiempo del último segundo
-
-
+  // ---- utilities -------------------------------------------------------------
   std::string identifyResolution(int width, int height) const;
-  void filterInefficientConfigurations(int width, int height) const;
-  void filterResolutionsByName(const std::string & resolution_name, bool preserve) const;
-  //std::pair<int, int> findBestResolutionMatch(int inner_width, int inner_height, int inner_selected_bitrate) const;
   std::pair<int, int> parseResolution(const std::string & res_str) const;
   void expectedBitrateLadder(int width, int height, int framerate) const;
   void filterBitrateLadder(double max_rate_mbps) const;
-
-  // ----- ABR -------
-
 };
+
 }  // namespace abr_ffmpeg_image_transport
 
 #endif  // ABR_FFMPEG_IMAGE_TRANSPORT__FFMPEG_PUBLISHER_HPP_

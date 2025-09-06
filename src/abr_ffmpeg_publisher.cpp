@@ -193,16 +193,30 @@ void ABRFFMPEGPublisher::advertiseImpl(
 }
 #endif
 
+
+
+
 rmw_qos_profile_t ABRFFMPEGPublisher::initialize(
   rclcpp::Node * node, const std::string & base_topic, rmw_qos_profile_t custom_qos)
 {
 
   /*
-  Load json posible resolutions resolutions
+  Load config.json
   */
   std::filesystem::path source_dir = std::filesystem::path(__FILE__).parent_path().parent_path();
-  std::filesystem::path file_path = source_dir / "json/resolution_configurations.json";
-  std::ifstream file1(file_path);
+  std::filesystem::path file_path1 = source_dir / "json/config.json";
+  std::ifstream f(file_path1);
+  if (!f.is_open()) {
+    throw std::runtime_error("Could not open the configuration file (config.json).");
+  }
+  f >> app_config_json_;
+
+
+  /*
+  Load json posible resolutions resolutions
+  */
+  std::filesystem::path file_path2 = source_dir / "json/resolution_configurations.json";
+  std::ifstream file1(file_path2);
 
   if (!file1.is_open()) {
     throw std::runtime_error("Could not open the resolution configuration file.");
@@ -221,8 +235,8 @@ rmw_qos_profile_t ABRFFMPEGPublisher::initialize(
   Load json bitladder
   */
 
-  file_path = source_dir / "json/bitrate_ladder.json";
-  std::ifstream file2(file_path);
+  std::filesystem::path file_path3 = source_dir / "json/bitrate_ladder.json";
+  std::ifstream file2(file_path3);
   if (!file2.is_open()) {
     std::cerr << "Couldnt open json file" << std::endl;
   }
@@ -250,6 +264,41 @@ rmw_qos_profile_t ABRFFMPEGPublisher::initialize(
       this->abrInfoCallback(msg);
     }
   );
+
+
+  double max_rate_mbps = 0.0;
+  if (app_config_json_.contains("max_rate_mbps")) {
+    if (app_config_json_["max_rate_mbps"].is_number()) {
+      max_rate_mbps = app_config_json_["max_rate_mbps"].get<double>();
+    } else if (app_config_json_["max_rate_mbps"].is_string() &&
+              app_config_json_["max_rate_mbps"].get<std::string>().empty()) {
+      max_rate_mbps = 0.0; // tratar string vacío como “sin límite”
+    }
+  }
+
+  // 0.0 = sin límite (misma semántica que ya usabas)
+  if (max_rate_mbps > 0.0) {
+    filterBitrateLadder(max_rate_mbps);
+  }
+
+  std::sort(bitrate_ladder.begin(), bitrate_ladder.end());
+
+  // Precálculo del bitrate inicial (mínimo escalón)
+  if (!bitrate_ladder.empty()) {
+    // Como ya ordenaste, también valdría: double min_mbps = bitrate_ladder.front();
+    const double min_mbps = bitrate_ladder.front();
+    selected_bitrate_init_bps_ = static_cast<int>(min_mbps * 1e6); // a bps
+    RCLCPP_INFO(logger_, "Initial bitrate selected (min ladder): %d bps", selected_bitrate_init_bps_);
+  } else {
+    RCLCPP_ERROR(logger_, "bitrate_ladder is empty after filtering!");
+    selected_bitrate_init_bps_ = 0;
+  }
+
+  // Prepara el string una vez
+  bitrate_ladder_string = nlohmann::json(bitrate_ladder).dump();
+
+  ladder_ready = true;
+
   /*
   Change CODEC parameters:
   */
@@ -277,7 +326,6 @@ rmw_qos_profile_t ABRFFMPEGPublisher::initialize(
   auto current_time = steady_clock.now();
 
   init_ready = true;
-  RCLCPP_INFO(logger_, "PRUEBA");
 
   // namespace handling code lifted from compressed_image_transport
   const uint ns_len = node->get_effective_namespace().length();
@@ -408,7 +456,7 @@ void ABRFFMPEGPublisher::publish(const Image & msg, const PublishFn & publish_fn
   me->publishFunction_ = &publish_fn;
 
   // Check if the system is ready to receive video
-  if (ready_to_recive_video) {
+  if (ready_to_receive_video) {
 
     if (!me->encoder_.isInitialized()) {
       if (!me->encoder_.initialize(
@@ -433,16 +481,7 @@ void ABRFFMPEGPublisher::publish(const Image & msg, const PublishFn & publish_fn
     if (init_ready) {
 
       // Load configuration settings from 'json'
-      std::filesystem::path source_dir =
-        std::filesystem::path(__FILE__).parent_path().parent_path();
-      std::filesystem::path file_path = source_dir / "json/config.json";
-      std::ifstream file1(file_path);
-      if (!file1.is_open()) {
-        throw std::runtime_error("Could not open the configuration file.");
-      }
-      nlohmann::json json_config;
-      file1 >> json_config;
-      file1.close();
+      const auto& json_config = app_config_json_;
 
       // Set framerate based on configuration file or calculate dynamically if not defined
       if (json_config.contains("target_framerate")) {
@@ -512,63 +551,26 @@ void ABRFFMPEGPublisher::publish(const Image & msg, const PublishFn & publish_fn
         height = msg.height;
         std::string resolution = identifyResolution(msg.width, msg.height);
 
-        std::filesystem::path source_dir =
-          std::filesystem::path(__FILE__).parent_path().parent_path();
-
-        std::filesystem::path file_path = source_dir / "json/config.json";
-        std::ifstream file1(file_path);
-        if (!file1.is_open()) {
-          throw std::runtime_error("Could not open the configuration file.");
-        }
-        nlohmann::json json_config;
-        file1 >> json_config;
-
-
-        double max_rate_mbps = json_config.value("max_rate_mbps", 0.0);
-        if (max_rate_mbps == 0.0 ||
-          (json_config["max_rate_mbps"].is_string() &&
-          json_config["max_rate_mbps"].get<std::string>().empty()))
-        {
-          max_rate_mbps = std::numeric_limits<double>::max();   // Set to a very high value if max_rate_mbps is 0 or empty string
-        }
-        filterBitrateLadder(max_rate_mbps);
-
-        nlohmann::json json_bitrate_ladder;
-        for (const auto & bitrate : bitrate_ladder) {
-          json_bitrate_ladder.push_back(bitrate);
-        }
-
-        bitrate_ladder_string = json_bitrate_ladder.dump();
-        ladder_ready = true;
-
 
         // Find the configuration with the lowest bitrate
-        if (!bitrate_ladder.empty()) {
-          selected_bitrate = *std::min_element(bitrate_ladder.begin(), bitrate_ladder.end()) * 1e6;
-          RCLCPP_INFO(logger_, "Selected bitrate (smallest in list): %d bps", selected_bitrate);
+        if (selected_bitrate_init_bps_ > 0) {
+          selected_bitrate = selected_bitrate_init_bps_;
+          RCLCPP_INFO(logger_, "Selected initial bitrate: %d bps", selected_bitrate);
         } else {
-          RCLCPP_ERROR(logger_, "bitrate_ladder is empty, cannot set selected_bitrate.");
+          RCLCPP_ERROR(logger_, "No initial bitrate available (empty ladder).");
         }
 
+
         //Load from config.json
-
-        // node_->set_parameter(rclcpp::Parameter("encoding", json_config.value("codecName", "libx264")));
-        // node_->set_parameter(rclcpp::Parameter("preset", json_config.value("codec_preset", "fast")));
-        // node_->set_parameter(rclcpp::Parameter("tune", "zerolatency"));
-        // node_->set_parameter(rclcpp::Parameter("gop_size", json_config.value("gop_size", 3)));
-        // node_->set_parameter(rclcpp::Parameter("frame_rate", static_cast<double>(framerate)));
-        // node_->set_parameter(rclcpp::Parameter("bit_rate", selected_bitrate));
-
 
         me->encoder_.setPreset(json_config.value("codecName", "libx264"));
         me->encoder_.setPreset(json_config.value("codec_preset", "fast"));
         me->encoder_.setTune("zerolatency");
         me->encoder_.setBitRate(selected_bitrate);
+        current_bitrate_mbps_ = selected_bitrate / 1e6;
         me->encoder_.setGOPSize(json_config.value("gop_size", 3));
         me->encoder_.setFrameRate(static_cast<double>(framerate), 1);
 
-
-        file1.close();
 
         forced_width = width;
         forced_height = height;
@@ -576,7 +578,7 @@ void ABRFFMPEGPublisher::publish(const Image & msg, const PublishFn & publish_fn
         RCLCPP_INFO(logger_, "Best resolution match found, forced_width: %d, forced_height: %d",
             forced_width, forced_height);
 
-        ready_to_recive_video = true;
+        ready_to_receive_video = true;
       }
     }
 
@@ -610,8 +612,6 @@ void ABRFFMPEGPublisher::abrInfoCallback(
   if (msg->role == "client") {
 
     if (msg->msg_type == 0) {  // HANDSHAKE
-
-      nlohmann::json json_msg = nlohmann::json::parse(msg->msg_json);
 
       if (ladder_ready) {  // Check if JSON is empty or matches your expected structure
         abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket init_msg;
@@ -658,11 +658,17 @@ void ABRFFMPEGPublisher::abrInfoCallback(
         auto it = std::lower_bound(bitrate_ladder.begin(), bitrate_ladder.end(), desired_bitrate);
 
         if (it == bitrate_ladder.end()) {
-          RCLCPP_WARN(logger_, "Desired bitrate not found in ladder, unable to change quality.");
-          return;
+          it = std::prev(bitrate_ladder.end());  // clamp al máximo
         }
 
         double selected_bitrate = *it;
+
+        if (current_bitrate_mbps_ == selected_bitrate) {
+          RCLCPP_DEBUG(logger_, "QUALITY_CHANGE: requested bitrate equals current; no-op");
+          return;
+        }
+
+
         RCLCPP_INFO(logger_, "New configuration ASKED: Bitrate: %f", selected_bitrate);
 
         abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket init_msg;
@@ -680,6 +686,7 @@ void ABRFFMPEGPublisher::abrInfoCallback(
         ABRFFMPEGPublisher * me = const_cast<ABRFFMPEGPublisher *>(this);
         me->encoder_.reset();
         me->encoder_.setBitRate(selected_bitrate * 1e6);
+        current_bitrate_mbps_ = selected_bitrate;
 
           // if (!encoder_.openCodec(forced_width, forced_height)) {
           //     RCLCPP_ERROR_STREAM(logger_, "Failed to reopen codec with new parameters!");

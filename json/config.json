@@ -11,7 +11,7 @@
     "abr_emergency_latency_threshold": 0.5,
     "predictor":"hm",
     "ripple_order":4,
-    "csv":false,
+    "csv":true,
     "republish_data":true,
     "max_rate_mbps":15
 }
