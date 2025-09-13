@@ -31,6 +31,9 @@ public:
   void abr_logic1(float predicted_bitrate);
   void abr_logic2();
 
+  enum class DebugMode { Off, Summary, Detailed };
+  DebugMode debug_mode_{DebugMode::Off};
+
     //bitrate_ladder public variables
   std::vector<double> bitrate_ladder;
   double actual_bitrate = 0.0;
@@ -51,16 +54,19 @@ public:
   void setStabilityTime(double value) {stability_recover_time = value;}
   void setForceResolution(bool value) {force_fixed_resolution = value;}
   void setDateRefhesh(rclcpp::Time value) {date_to_refresh = value;}
-  void setCsv(bool value) {csv = value;}
   void setStartTime(rclcpp::Time value) {start_time = value;}
   void setPreviousTimeStamp(rclcpp::Time value) {previous_timeStamp = value;}
   void setStabilityThreshold(double value) {stability_threshold = value;}
   void setSimilarityThreshold(double value) {similarity_threshold = value;}
   void setEmergencyTresh(double value) {emergency_latency_threshold = value;}
   void setPredictor(std::string value) {abr_predictor = value;}
-  void setRepublishData(bool republish_data) {republish_data_ = republish_data;}
   void setRippleOrder(int value) {ripple_order = value;}
-
+  void setDebugMode(const std::string &mode) {
+    if      (mode == "detailed") debug_mode_ = DebugMode::Detailed;
+    else if (mode == "summary")  debug_mode_ = DebugMode::Summary;
+    else                         debug_mode_ = DebugMode::Off;
+  }
+  
 
   int getKFactor() const {return k_factor;}
   double getBitrateTimeWindow() const {return bitrate_time_window;}
@@ -71,23 +77,31 @@ public:
   int getStabilityTime() {return stability_recover_time;}
   bool getForceResolution() {return  force_fixed_resolution;}
   rclcpp::Time getDateRefresh() {return date_to_refresh;}
-  bool getCsv() {return csv;}
   rclcpp::Time getStartTime() {return start_time;}
   double getStabilityThreshold() {return stability_threshold;}
   double getSimilarityThreshold() {return similarity_threshold;}
   double getEmergencyTresh() {return emergency_latency_threshold;}
   std::string getPredictor() {return abr_predictor;}
-  bool getRepublishData() const {return republish_data_;}
   int getRippleOrder() const {return ripple_order;}
-  
+
+  bool isDebugActivated(const std::string &mode){
+    return (mode == "detailed" || mode == "summary");
+  }
+
+  DebugMode getDebugMode() const { return debug_mode_; }
+
+
+
 
   void reconfigureBuffers();
   void getAndPrintSystemUsage();
-  void initCsvFile();
   void activateEmergencyMode();
   void updateUnestabilityBuffer(bool isUnstable);
 
-  void publishAbrInfo(
+
+  void setDebugPublishFn(std::function<void(const std::string&)> fn) { debug_publish_fn_ = std::move(fn); }
+
+  void publishAbrInfoSummary(
   double size,
   double latency,
   double instant_bitrate,
@@ -99,6 +113,11 @@ public:
   const rclcpp::Time &actual_time
 );
 
+void publishAbrInfoDetailed(double size, double latency, double instant_bitrate,
+                            double measured_fps, double ideal_expected_bitrate,
+                            const rclcpp::Time &actual_time,
+                            const std::string &encoding);
+
 
   int bitrate_buffer_position = 0;
   std::deque<double> bitrate_buffer_;
@@ -107,12 +126,15 @@ public:
   std::deque<bool> unestability_buffer_;
 
   std::ofstream log_file_;
-  bool csv = false;
   rclcpp::Time start_time;
   rclcpp::Time previous_timeStamp;
   double measured_fps = 30;
 
+  std::function<void(const std::string&)> debug_publish_fn_;
+
 private:
+
+
     //Values:
   int k_factor = 1;        //Number of steps that the algorithim moved up or down
   std::string abr_predictor = "hm";

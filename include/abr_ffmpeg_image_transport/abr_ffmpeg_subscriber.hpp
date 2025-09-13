@@ -19,7 +19,7 @@
 #include <ffmpeg_encoder_decoder/decoder.hpp>
 #include <ffmpeg_image_transport_msgs/msg/ffmpeg_packet.hpp>
 #include <image_transport/simple_subscriber_plugin.hpp>
-#include <string>
+#include <std_msgs/msg/string.hpp> 
 
 #include "abr_ffmpeg_image_transport/abr_component.hpp"
 
@@ -59,19 +59,34 @@ protected:
   rclcpp::Node * node_;
 
 private:
+
+
   void frameReady(const ImageConstPtr & img, bool /*isKeyFrame*/) const;
   void initialize(rclcpp::Node * node, const std::string & base_topics);
+  abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket makeInitMsg() const;
+  void scheduleHandshakeRetry(std::chrono::milliseconds delay);
+  void cancelHandshakeRetry();
+
   // -------------- variables
   rclcpp::Logger logger_;
   ffmpeg_encoder_decoder::Decoder decoder_;
   std::string decoderType_;
   const Callback * userCallback_;
   std::string param_namespace_;
+  nlohmann::json config_cache_;
+  rclcpp::Clock system_clock_{RCL_SYSTEM_TIME};
+
+
+  // Handshake
+  rclcpp::TimerBase::SharedPtr handshake_timer_;
+  std::chrono::milliseconds handshake_backoff_{1000};  // 1s inicial
+  const std::chrono::milliseconds handshake_backoff_max_{8000}; // máx 8s
+
 
 
   //ABR algorithm
   AbrComponent abr_component_;
-  bool allow_transmition_ = false;
+  std::atomic<bool> allow_transmition_{false};
   mutable std::vector<double> bitrate_ladder;
 
   // ABR communication channels
@@ -81,6 +96,13 @@ private:
     abr_info_subscriber_;
   void abrInfoCallback(
     const abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket::SharedPtr msg);
+
+  // Debug mode wiring
+  bool debug_enabled_{false};
+  std::shared_ptr<rclcpp::Node> debug_node_;  
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr abr_debug_pub_;
+  std::string debug_topic_{"abr_debug/json"};
+
 
 };
 }  // namespace abr_ffmpeg_image_transport

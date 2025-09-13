@@ -11,7 +11,10 @@
     "abr_emergency_latency_threshold": 0.5,
     "predictor":"hm",
     "ripple_order":4,
-    "csv":true,
-    "republish_data":true,
-    "max_rate_mbps":15
+    "max_rate_mbps":15,
+    "abr_debug": {         
+        "mode": "summary", 
+        "topic": "abr_debug/json",
+        "rate_hz": 0                 
+    }
 }

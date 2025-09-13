@@ -185,7 +185,7 @@ void AbrComponent::analyzeFlow(
      * instant bitrate, harmonic mean, mean, median, and jitter, which are used to monitor the
      * system’s streaming performance. It also updates internal buffers and, if necessary,
      * activates emergency mode if latency exceeds a defined threshold. Additionally, the function
-     * logs information to a CSV file and publishes key metrics as a JSON message when enabled.
+     *
      *
      * @param msg The incoming FFMPEG packet containing video data.
      * @param node_ The ROS node used for logging and timing information.
@@ -210,7 +210,8 @@ void AbrComponent::analyzeFlow(
     RCLCPP_INFO(node_->get_logger(), "Emergency mode activated");
   }
 
-  if (allow_transmition_ && (actual_time > getDateRefresh())) {
+
+  if (actual_time > getDateRefresh()) {
 
         // Update latency buffer
     if (static_cast<int>(latency_buffer_.size()) == getBitrateBufferSize()) {
@@ -249,6 +250,12 @@ void AbrComponent::analyzeFlow(
 
     bitrate_buffer_position += 1;
 
+    if (debug_mode_ == DebugMode::Detailed && debug_publish_fn_) {
+      publishAbrInfoDetailed(size, latency, instant_bitrate,
+                       measured_fps, ideal_expected_bitrate,
+                       actual_time, msg.encoding);
+    }
+
     if (bitrate_buffer_position >= getBitrateBufferSize()) {    //NO sliding window for the moment
 
       bitrate_buffer_position = 0;
@@ -258,21 +265,21 @@ void AbrComponent::analyzeFlow(
       double median = calculateMedian();
       double jitter = calculateJitter();
 
-            // Limit values to no surpass variable type
+      // Limit values to no surpass variable type
       if (hm > max_bitrate) {
         hm = max_bitrate;
       }
 
-      if (mean > mean) {
+      if (mean > max_bitrate) {
         mean = mean;
       }
 
-      if (median > median) {
+      if (median > max_bitrate) {
         median = median;
       }
 
 
-            // Update the voter buffer based on the selected metric
+      // Update the voter buffer based on the selected metric
       if (abr_predictor == "median") {
         voter_buffer_.push_back(median);
       } else if (abr_predictor == "hm") {
@@ -290,38 +297,11 @@ void AbrComponent::analyzeFlow(
         voter_buffer_.pop_front();
       }
 
-            // Log data to CSV if enabled
-      if (getCsv() && log_file_.is_open()) {
 
-        auto it = std::find(bitrate_ladder.begin(), bitrate_ladder.end(), actual_bitrate);
-
-        int stability_count = std::count(unestability_buffer_.begin(), unestability_buffer_.end(),
-          true);
-
-        log_file_       << std::fixed << std::setprecision(12)
-                        << actual_time.seconds() << ","
-                        << size / 1e6 << ","
-                        << latency << ","
-                        << instant_bitrate / 1e6 << ","
-                        << mean / 1e6 << ","
-                        << hm / 1e6 << ","
-                        << median / 1e6 << ","
-                        << ideal_expected_bitrate / 1e6 << ","
-                        << *it << ","
-                        << jitter << ","
-                        << stability_count << ","
-                        << measured_fps <<
-          "\n";
-
-        log_file_.flush();
-
-      }
-
-      if (republish_data_) {
-        publishAbrInfo(size, latency, instant_bitrate, mean, hm, median,
+      if (debug_mode_== DebugMode::Summary && debug_publish_fn_) {
+        publishAbrInfoSummary(size, latency, instant_bitrate, mean, hm, median,
                       jitter, ideal_expected_bitrate, actual_time);
       }
-
 
       abr_logic2();
       bitrate_buffer_.clear();
@@ -332,7 +312,7 @@ void AbrComponent::analyzeFlow(
   previous_timeStamp = actual_time;
 }
 
-void AbrComponent::publishAbrInfo(
+void AbrComponent::publishAbrInfoSummary(
     double size,
     double latency,
     double instant_bitrate,
@@ -343,27 +323,48 @@ void AbrComponent::publishAbrInfo(
     double ideal_expected_bitrate,
     const rclcpp::Time &actual_time)
 {
-  // Construir mensaje
-  abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket abr_info_msg;
-  abr_info_msg.role = "client";
-  abr_info_msg.msg_type = 4;
-
+  // Construir el payload JSON (única fuente de verdad)
   nlohmann::json msg_json = {
     {"elapsed_time", (actual_time - getStartTime()).seconds()},
-    {"size", size / 1e6},
-    {"latency", latency},
-    {"instant_bitrate", instant_bitrate / 1e6},
-    {"mean", mean / 1e6},
-    {"hm", hm / 1e6},
-    {"median", median / 1e6},
-    {"jitter", jitter},
-    {"ideal_rate", ideal_expected_bitrate / 1e6},
+    {"size",               size / 1e6},
+    {"latency",            latency},
+    {"instant_bitrate",    instant_bitrate / 1e6},
+    {"mean",               mean / 1e6},
+    {"hm",                 hm / 1e6},
+    {"median",             median / 1e6},
+    {"jitter",             jitter},
+    {"ideal_rate",         ideal_expected_bitrate / 1e6},
+    {"actual_bitrate",     actual_bitrate},        // útil para debug
+    {"previous_bitrate",   previous_bitrate},      // útil para debug
+    {"predictor",          abr_predictor}          // útil para debug
   };
 
-  abr_info_msg.msg_json = msg_json.dump();
 
-  // Publicar
-  publish_msg_(abr_info_msg);
+    debug_publish_fn_(msg_json.dump());
+}
+
+void AbrComponent::publishAbrInfoDetailed(
+    double size,
+    double latency,
+    double instant_bitrate,
+    double measured_fps,
+    double ideal_expected_bitrate,
+    const rclcpp::Time &actual_time,
+    const std::string &encoding)
+{
+  if (!debug_publish_fn_) return;  // defensivo
+
+  nlohmann::json jf = {
+    {"elapsed_time",     (actual_time - getStartTime()).seconds()},
+    {"size",             size / 1e6},            // asumiendo 'size' en bits → Mb
+    {"latency",          latency},               // s
+    {"instant_bitrate",  instant_bitrate / 1e6}, // bits/s → Mb/s
+    {"measured_fps",     measured_fps},
+    {"ideal_rate",       ideal_expected_bitrate / 1e6}, // bits/s → Mb/s
+    {"encoding",         encoding}
+  };
+
+  debug_publish_fn_(jf.dump());
 }
 
 
@@ -725,25 +726,3 @@ void AbrComponent::getAndPrintSystemUsage()
               << "Memory Usage: " << memUsage << "%" << std::endl;
 }
 
-
-void AbrComponent::initCsvFile()
-{
-    /**
-     * @brief Initializes a CSV file for logging ABR component data.
-     *
-     * If CSV logging is enabled, this function opens a new file named "abrcomponent_csv.csv"
-     * and writes a header row with the column names. The file will be used to log various
-     * parameters related to Adaptive Bitrate (ABR) performance, such as packet size, latency,
-     * and jitter, among others.
-     */
-
-  if (getCsv()) {
-            // Open CSV file
-    log_file_.open("abrcomponent_csv.csv");
-    log_file_ <<
-      "time_s,size_Mb,latency_s,instant_Mb,mean_Mb,hm_Mb,median_Mb,maximun_Mb,active_conf,jitter,stability_buffer,fps\n";
-                                                                                                                                             // CSV size header
-    log_file_.flush();
-  }
-
-}

@@ -18,6 +18,8 @@
 #include <abr_ffmpeg_image_transport/abr_ffmpeg_subscriber.hpp>
 #include <functional>
 #include <unordered_map>
+#include <std_msgs/msg/string.hpp>
+
 
 using namespace std::placeholders;
 
@@ -28,9 +30,10 @@ ABRFFMPEGSubscriber::ABRFFMPEGSubscriber()
 
 ABRFFMPEGSubscriber::~ABRFFMPEGSubscriber()
 {
-  abr_component_.reset();
-  decoder_.reset(); // Reset decoder to adapt to new configurations
+  cancelHandshakeRetry();
   decoder_.resetTimers();
+  decoder_.reset();
+  abr_component_.reset();
 }
 
 void ABRFFMPEGSubscriber::frameReady(const ImageConstPtr & img, bool) const {(*userCallback_)(img);}
@@ -58,6 +61,10 @@ void ABRFFMPEGSubscriber::subscribeImpl(
 }
 #endif
 
+
+
+
+
 void ABRFFMPEGSubscriber::initialize(rclcpp::Node * node, const std::string & base_topic)
 {
   node_ = node;
@@ -66,6 +73,57 @@ void ABRFFMPEGSubscriber::initialize(rclcpp::Node * node, const std::string & ba
   std::string param_base_name = base_topic.substr(ns_len);
   std::replace(param_base_name.begin(), param_base_name.end(), '/', '.');
   param_namespace_ = param_base_name + "." + getTransportName() + ".map.";
+
+
+  /*
+  Load params from config file
+  */
+  std::filesystem::path source_dir = std::filesystem::path(__FILE__).parent_path().parent_path();
+  std::filesystem::path file_path = source_dir / "json/config.json";
+  std::ifstream file(file_path);
+  if (!file.is_open()) {
+    RCLCPP_WARN(logger_, "No config.json found, using defaults");
+  } else {
+    file >> config_cache_;
+  }
+
+
+  const auto dbg = config_cache_.value("abr_debug", nlohmann::json::object());
+  const std::string dbg_mode = dbg.value("mode", std::string("off"));
+  debug_enabled_ = abr_component_.isDebugActivated(dbg_mode);
+  debug_topic_   = dbg.value("topic", std::string("abr_debug/json"));
+
+  // Si está activo, crear un nodo Y publisher exclusivo para debug
+  if (debug_enabled_ ) {
+    // Nodo ligero separado (no necesita spin para publicar)
+    debug_node_ = std::make_shared<rclcpp::Node>("abr_debug_node");
+
+    // QoS ligero: BestEffort + Volatile (no afecta al pipeline)
+    rclcpp::QoS dbg_qos(10);
+    dbg_qos.reliability(rclcpp::ReliabilityPolicy::BestEffort);
+    dbg_qos.durability(rclcpp::DurabilityPolicy::Volatile);
+
+    abr_debug_pub_ = debug_node_->create_publisher<std_msgs::msg::String>(debug_topic_, dbg_qos);
+
+    // Pasar callback de publicación JSON al AbrComponent y activar su modo debug
+    abr_component_.setDebugMode(dbg_mode);
+
+    abr_component_.setDebugPublishFn(
+      [this](const std::string &json_str) {
+        if (!abr_debug_pub_) return;
+        std_msgs::msg::String m;
+        m.data = json_str;
+        abr_debug_pub_->publish(m);
+      }
+    );
+
+    RCLCPP_INFO(logger_, "ABR debug mode ENABLED → publishing JSON to '%s'", debug_topic_.c_str());
+  } else {
+    abr_component_.setDebugMode("off");
+    abr_component_.setDebugPublishFn(nullptr);
+  }
+
+
   // create parameters from default map
   for (const auto & kv : ffmpeg_encoder_decoder::Decoder::getDefaultEncoderToDecoderMap()) {
     const std::string key = param_namespace_ + kv.first;
@@ -107,11 +165,8 @@ void ABRFFMPEGSubscriber::initialize(rclcpp::Node * node, const std::string & ba
       std::bind(&ABRFFMPEGSubscriber::abrInfoCallback, this, std::placeholders::_1));
 
   // Send an initial "init" message
-  abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket init_msg;
-  init_msg.role = "client";
-  init_msg.msg_type = 0;
-  init_msg.msg_json = "{}";
-  abr_info_publisher_->publish(init_msg);
+    abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket init_msg = makeInitMsg();
+    abr_info_publisher_->publish(init_msg);
 
   abr_component_.publish_msg_ =
     [this](const abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket & msg) {
@@ -125,9 +180,11 @@ void ABRFFMPEGSubscriber::internalCallback(
   const Callback & user_cb)
 {
   if (allow_transmition_) {
+
+
     if (!decoder_.isInitialized()) {
       if (msg->flags == 0) {
-        RCLCPP_ERROR_STREAM(logger_, "waiting for key frame");
+        RCLCPP_WARN_THROTTLE(logger_, *node_->get_clock(), 5000, "waiting for key frame");
         abr_component_.updateUnestabilityBuffer(true);
         abr_component_.analyzeFlow(*msg, node_);
         return;  // wait for key frame!
@@ -152,8 +209,14 @@ void ABRFFMPEGSubscriber::internalCallback(
     }
 
     abr_component_.analyzeFlow(*msg, node_);
+
+    if (msg->data.empty()) {
+      RCLCPP_WARN(logger_, "Empty packet data, skipping");
+      return;
+    }
+
     decoder_.decodePacket(
-      msg->encoding, &msg->data[0], msg->data.size(), msg->pts, msg->header.frame_id,
+      msg->encoding, msg->data.data(), msg->data.size(), msg->pts, msg->header.frame_id,
       msg->header.stamp);
   }
 }
@@ -167,6 +230,48 @@ void ABRFFMPEGSubscriber::internalCallback(
  |_____|_| \_|_|    \____/    \_____/_/    \_\______|______|____/_/    \_\_____|_|\_\
 
 */
+
+
+
+abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket ABRFFMPEGSubscriber::makeInitMsg() const
+{
+  abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket msg;
+  msg.role = "client";
+  msg.msg_type = 0;
+  msg.msg_json = "{}";
+  return msg;
+}
+
+
+
+void ABRFFMPEGSubscriber::scheduleHandshakeRetry(std::chrono::milliseconds delay)
+{
+  // Cancela un timer previo (si existe) para no solapar reintentos
+  cancelHandshakeRetry();
+
+  // Programa un timer de un solo disparo
+  handshake_timer_ = node_->create_wall_timer(
+    delay,
+    [this]() {
+      // Publica init y cancela el timer (single-shot)
+      abr_info_publisher_->publish(makeInitMsg());
+      handshake_timer_.reset();
+
+      // Aumenta backoff (exponencial limitada)
+      handshake_backoff_ = std::min(handshake_backoff_ * 2, handshake_backoff_max_);
+    });
+}
+
+
+
+void ABRFFMPEGSubscriber::cancelHandshakeRetry()
+{
+  if (handshake_timer_) {
+    handshake_timer_->cancel();
+    handshake_timer_.reset();
+  }
+}
+
 
 
 void ABRFFMPEGSubscriber::abrInfoCallback(
@@ -195,6 +300,8 @@ void ABRFFMPEGSubscriber::abrInfoCallback(
 
         //Positive confirmation of the publisher
         RCLCPP_INFO(logger_, "Handshake finished successfully");
+        cancelHandshakeRetry();
+        handshake_backoff_ = std::chrono::milliseconds(1000);
 
         //Obtain the bitrate ladder and map it.
         std::string bitrate_ladder_string = json_msg["bitrate_ladder"];
@@ -214,63 +321,41 @@ void ABRFFMPEGSubscriber::abrInfoCallback(
         RCLCPP_INFO(logger_, "Desired width: %d, Desired height: %d and desired framerate: %d",
             desired_width, desired_height, framerate);
 
-        /*
-        Load params from config file
-        */
-        std::filesystem::path source_dir =
-          std::filesystem::path(__FILE__).parent_path().parent_path();
-        std::filesystem::path file_path = source_dir / "json/config.json";
+ 
+        abr_component_.setKFactor(config_cache_.value("abr_k_factor", abr_component_.getKFactor()));
 
-        std::ifstream file1(file_path);
-        if (!file1.is_open()) {
-          throw std::runtime_error("Could not open the resolution configuration file.");
-        }
-
-        nlohmann::json json_config;
-        file1 >> json_config;
-        abr_component_.setKFactor(json_config.value("abr_k_factor", abr_component_.getKFactor()));
-
-        abr_component_.setBitrateTimeWindow(json_config.value("abr_bitrate_time_window",
+        abr_component_.setBitrateTimeWindow(config_cache_.value("abr_bitrate_time_window",
             abr_component_.getBitrateTimeWindow()));
         abr_component_.setBitrateBufferSize(std::max(1,
             static_cast<int>(std::ceil(framerate * abr_component_.getBitrateTimeWindow()))));
 
         abr_component_.setVoterBufferSize(2);
 
-        abr_component_.setStabilityTime(json_config.value("abr_stability_recover_time",
+        abr_component_.setStabilityTime(config_cache_.value("abr_stability_recover_time",
             abr_component_.getStabilityTime()));
 
-        abr_component_.setCsv(json_config.value("csv", abr_component_.getCsv()));
-
-        abr_component_.setStabilityThreshold(json_config.value("abr_stability_threshold",
+        abr_component_.setStabilityThreshold(config_cache_.value("abr_stability_threshold",
             abr_component_.getStabilityThreshold()));
 
-        abr_component_.setSimilarityThreshold(json_config.value("abr_similarity_threshold",
+        abr_component_.setSimilarityThreshold(config_cache_.value("abr_similarity_threshold",
             abr_component_.getSimilarityThreshold()));
 
-        abr_component_.setEmergencyTresh(json_config.value("abr_emergency_latency_threshold",
+        abr_component_.setEmergencyTresh(config_cache_.value("abr_emergency_latency_threshold",
             abr_component_.getEmergencyTresh()));
 
-        abr_component_.setPredictor(json_config.value("abr_predictor",
+        abr_component_.setPredictor(config_cache_.value("abr_predictor",
             abr_component_.getPredictor()));
 
-        abr_component_.setRepublishData(json_config.value("republish_data",
-            abr_component_.getRepublishData()));
-
-        abr_component_.setRippleOrder(json_config.value("ripple_order",
+        abr_component_.setRippleOrder(config_cache_.value("ripple_order",
             abr_component_.getRippleOrder()));
 
         abr_component_.reconfigureBuffers();
 
-        auto system_clock = std::make_shared<rclcpp::Clock>(RCL_SYSTEM_TIME);
-        rclcpp::Time actual_time = system_clock->now();
+        rclcpp::Time actual_time = system_clock_.now();
+
         abr_component_.setStartTime(actual_time);
         abr_component_.setDateRefhesh(abr_component_.getStartTime());
         abr_component_.setPreviousTimeStamp(abr_component_.getStartTime());
-
-        file1.close();
-
-        abr_component_.initCsvFile();
 
         if (!bitrate_ladder.empty()) {
           abr_component_.bitrate_ladder = bitrate_ladder;
@@ -290,17 +375,7 @@ void ABRFFMPEGSubscriber::abrInfoCallback(
 
       } else {
 
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket init_msg;
-        init_msg.role = "client";
-        init_msg.msg_type = 0;
-        init_msg.msg_json = "{}";
-        abr_info_publisher_->publish(init_msg);
-
-        abr_component_.publish_msg_ =
-          [this](const abr_ffmpeg_image_transport_interfaces::msg::ABRInfoPacket & msg) {
-            this->abr_info_publisher_->publish(msg);
-          };
+        scheduleHandshakeRetry(handshake_backoff_);
 
       }
 
@@ -310,8 +385,8 @@ void ABRFFMPEGSubscriber::abrInfoCallback(
       if (json_msg["confirmed"].get<bool>()) {
 
         //Positive confirmation from the publisher.
-        decoder_.reset(); // Reset decoder to adapt to new configurations
         decoder_.resetTimers();
+        decoder_.reset(); // Reset decoder to adapt to new configurations
 
         double selected_bitrate = json_msg["selected_bitrate"].get<double>();
         abr_component_.previous_bitrate = abr_component_.actual_bitrate;
@@ -322,8 +397,7 @@ void ABRFFMPEGSubscriber::abrInfoCallback(
 
         allow_transmition_ = true;
 
-        auto system_clock = std::make_shared<rclcpp::Clock>(RCL_SYSTEM_TIME);
-        rclcpp::Time actual_time = system_clock->now();
+        rclcpp::Time actual_time = system_clock_.now();
 
         abr_component_.setDateRefhesh(actual_time +
             rclcpp::Duration::from_seconds(abr_component_.getStabilityTime()));
